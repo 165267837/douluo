@@ -1,0 +1,24 @@
+{
+  "name": "斗罗大陆",
+  "short_name": "斗罗大陆",
+  "description": "斗罗大陆3D动作游戏",
+  "start_url": "./index.html",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#000000",
+  "theme_color": "#1a1a2e",
+  "icons": [
+    {
+      "src": "tangsan.jpg",
+      "sizes": "192x192",
+      "type": "image/jpeg",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "tangsan.jpg",
+      "sizes": "512x512",
+      "type": "image/jpeg",
+      "purpose": "any maskable"
+    }
+  ]
+}
