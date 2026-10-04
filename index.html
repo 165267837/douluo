@@ -54588,6 +54588,31 @@ function gameLoop() {
 })();
 
 
+// ==================== 强制横屏坐标换算（聚光灯遮罩共用） ====================
+// body.force-landscape = transform-origin:top left + rotate(90deg) translateY(-100%)：
+//   本地(x,y) → 视觉(vW−y, x)，vW=window.innerWidth（视觉宽）。
+// 聚光灯遮罩(#tutorial-overlay / #egg-guide-overlay)的 .tut-panel 是 position:fixed，
+// 在被旋转的 body 内 → 其 left/top 是「本地坐标」；而 window.innerWidth/innerHeight 与
+// getBoundingClientRect() 返回的都是「旋转后的视觉坐标」。直接混用会导致：
+// 遮罩按视觉短边(412)写在本地长边(915)的空间上 → 只盖住半屏、气泡跑出屏幕。
+// 统一换算：flViewportCtx() 给出本地宽高；flRectToLocal() 把视觉 AABB 转成本地矩形。
+function flViewportCtx() {
+  var W = window.innerWidth, H = window.innerHeight;
+  var fl = !!(document.body && document.body.classList.contains('force-landscape'));
+  if (!fl) return { fl: false, W: W, H: H, vW: W };
+  // 强制横屏：body 本地宽 = 视觉高，本地高 = 视觉宽
+  return { fl: true, W: H, H: W, vW: W };
+}
+function flRectToLocal(r, ctx) {
+  if (!r) return null;
+  ctx = ctx || (typeof flViewportCtx === 'function' ? flViewportCtx() : { fl: false });
+  if (!ctx.fl) return { left: r.left, top: r.top, width: r.width, height: r.height, right: r.right, bottom: r.bottom };
+  var left = r.top, top = ctx.vW - r.right;
+  return { left: left, top: top, width: r.height, height: r.width, right: left + r.height, bottom: top + r.width };
+}
+window.flViewportCtx = flViewportCtx;
+window.flRectToLocal = flRectToLocal;
+
 // ==================== 新手引导 + 玩法百科 ====================
 // 自包含模块：HTML/CSS 由 JS 注入；不改既有面板结构；复用 data-modal / game.uiOpen 约定。
 (function () {
@@ -54777,9 +54802,11 @@ function gameLoop() {
   }
   function showStep(i) {
     var st = STEPS[i]; if (!st || !T.el) return;
-    var W = window.innerWidth, H = window.innerHeight;
+    // 强制横屏：遮罩写在 body 本地坐标系 → 用本地宽高，并把目标视觉 AABB 换算成本地矩形
+    var _vc = (typeof flViewportCtx === 'function') ? flViewportCtx() : { fl: false, W: window.innerWidth, H: window.innerHeight };
+    var W = _vc.W, H = _vc.H;
     var tgt = pickTarget(st);
-    var R = tgt ? tgt.getBoundingClientRect() : null;
+    var R = tgt ? flRectToLocal(tgt.getBoundingClientRect(), _vc) : null;
     var hasHole = !!(R && R.width > 4 && R.height > 4);
     T.el.ov.classList.remove('tut-hidden');
     T.el.bubble.classList.remove('tut-hidden');
@@ -61346,9 +61373,11 @@ window.onerror = function(msg, url, line, col, error) {
   }
   function show(i) {
     var st = OBJ[i]; if (!st || !E.el) return;
-    var W = window.innerWidth, H = window.innerHeight;
+    // 强制横屏：与 Tutorial.showStep 相同的坐标系换算（见 flViewportCtx/flRectToLocal）
+    var _vc = (typeof flViewportCtx === 'function') ? flViewportCtx() : { fl: false, W: window.innerWidth, H: window.innerHeight };
+    var W = _vc.W, H = _vc.H;
     var tgt = stepTarget(i);
-    var R = tgt ? tgt.getBoundingClientRect() : null;
+    var R = tgt ? flRectToLocal(tgt.getBoundingClientRect(), _vc) : null;
     var hasHole = !!(R && R.width > 4 && R.height > 4);
     E.el.ov.classList.remove('egg-guide-hidden');
     E.el.bubble.classList.remove('tut-hidden');
