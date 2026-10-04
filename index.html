@@ -23592,6 +23592,12 @@ function tryInteract() {
   if (villageVisible && typeof PetSystem !== 'undefined' && PetSystem.tryOpenPlacePanel) {
     if (PetSystem.tryOpenPlacePanel(playerPos)) return;
   }
+  // 世界事件魂兽蛋：靠近交互键拾取（拾取会激怒守护魂兽）
+  try {
+    if (typeof WorldEvents !== 'undefined' && WorldEvents.eggEvt && WorldEvents.eggEvt.mesh && !WorldEvents.eggEvt.picked) {
+      if (playerPos.distanceTo(WorldEvents.eggEvt.mesh.position) < 4) { WorldEvents.pickEgg(); return; }
+    }
+  } catch (e) { }
   
   // 检查神界石碑传送（已禁用，不再与石碑交互）
   // if (typeof DivineRealm !== 'undefined' && DivineRealm.active && DivineRealm.nearestPillar) {
@@ -23751,6 +23757,14 @@ function getNearestInteractable() {
       if (_pd < 8 && _pd < nearestDist) { nearest = _penA; nearestDist = _pd; nearestType = 'pet_pen'; }
     }
   }
+  // 世界事件魂兽蛋（高品质蛋）：靠近可拾取
+  try {
+    if (typeof WorldEvents !== 'undefined' && WorldEvents.eggEvt && WorldEvents.eggEvt.mesh && !WorldEvents.eggEvt.picked) {
+      const _egg = WorldEvents.eggEvt;
+      const _ed = playerPos.distanceTo(_egg.mesh.position);
+      if (_ed < 4 && _ed < nearestDist) { nearest = _egg.mesh; nearestDist = _ed; nearestType = 'event_egg'; }
+    }
+  } catch (e) { }
   
   // 神界石碑（已禁用交互，不再检测）
   // if (typeof DivineRealm !== 'undefined' && DivineRealm.active && DivineRealm.sceneObjects.pillars) {
@@ -23950,6 +23964,9 @@ function computeInteractText(res) {
       break;
     case 'pet_pen':
       text = '放入魂兽蛋';
+      break;
+    case 'event_egg':
+      text = '拾取' + ((typeof WorldEvents !== 'undefined' && WorldEvents.eggEvt) ? WorldEvents.eggEvt.name : '魂兽蛋');
       break;
     default:
       text = '交互';
@@ -43276,6 +43293,8 @@ function executeBeastAttack(beast, atkDef, pPos, dist) {
 }
 
 function playerDeath() {
+  // 世界事件魂兽蛋：死亡时若还「携带着」蛋（尚未安全落袋），蛋掉落回原地
+  try { if (typeof WorldEvents !== 'undefined' && WorldEvents.heldEgg) WorldEvents.dropHeldEgg(); } catch (e) { }
   game.state = 'dead';
   document.exitPointerLock();
   
@@ -53551,7 +53570,11 @@ function gameLoop() {
   // ---------- 世界随机事件 ----------
   var WorldEvents = {
     timer: 0, active: null, MARKER: null, started: false,
+    nextGap: 0,             // 首次触发前惰性初始化（修复：原为 undefined → timer>=undefined 恒 false，事件永不刷新）
+    eggTimer: 0, eggEvt: null, heldEgg: null,
     MIN_GAP: 180000, MAX_GAP: 480000,
+    EGG_GAP: 300000,        // 魂兽蛋世界事件：固定 5 分钟刷新
+    EGG_NAMES: ['普通蛋', '稀有蛋', '史诗蛋', '传说蛋', '神话蛋'],
     rollGap: function () { return WorldEvents.MIN_GAP + Math.random() * (WorldEvents.MAX_GAP - WorldEvents.MIN_GAP); },
     announce: function (text, sub) {
       try {
@@ -53677,6 +53700,8 @@ function gameLoop() {
     },
     update: function (dt, ms) {
       if (!game || game.state !== 'playing') return;
+      // 惰性初始化 nextGap（修复：nextGap 原为 undefined，timer>=undefined 恒 false → 事件永不触发）
+      if (!WorldEvents.nextGap) WorldEvents.nextGap = WorldEvents.rollGap();
       var now = Date.now();
       // 事件对象动画
       if (WorldEvents.active) {
@@ -53701,6 +53726,13 @@ function gameLoop() {
           WorldEvents.trigger();
         }
       }
+      // 魂兽蛋世界事件：固定 5 分钟刷新（独立于上面的通用随机事件，互不阻塞）
+      WorldEvents.eggTimer += ms;
+      if (WorldEvents.eggTimer >= WorldEvents.EGG_GAP) {
+        WorldEvents.eggTimer = 0;
+        if (!WorldEvents.eggEvt) WorldEvents.triggerEgg();
+      }
+      WorldEvents._tickEgg(now);
     },
     _openChest: function (evt) {
       evt.data.opened = true;
@@ -53754,26 +53786,172 @@ function gameLoop() {
       }, 3000);
     },
     _kickTimer: function (evt, leftMs) { evt.endTime = Date.now() + leftMs; },
+    // ==================== 魂兽蛋世界事件（每 5 分钟） ====================
+    _eggName: function (g) { return WorldEvents.EGG_NAMES[g] || (g + '阶蛋'); },
+    _gradeName: function (g) { try { return (CONFIG.RING_GRADES && CONFIG.RING_GRADES[g] && CONFIG.RING_GRADES[g].name) || (g + '阶'); } catch (e) { return g + '阶'; } },
+    _eggColorHex: function (g) {
+      try {
+        var q = CONFIG.EQUIP_QUALITY && CONFIG.EQUIP_QUALITY[g];
+        return parseInt((q && q.color ? q.color : '#9ca3af').replace('#', ''), 16);
+      } catch (e) { return 0x9ca3af; }
+    },
+    // 高品质偏向：史诗(2)/传说(3)/神话(4)为主
+    _rollEggGrade: function () {
+      var r = Math.random();
+      if (r < 0.30) return 4;   // 神话蛋（十万年）
+      if (r < 0.68) return 3;   // 传说蛋（万年）
+      return 2;                 // 史诗蛋（千年）
+    },
+    _makeEggMesh: function (g) {
+      var col = WorldEvents._eggColorHex(g);
+      var root = new THREE.Group();
+      var egg = new THREE.Mesh(new THREE.SphereGeometry(0.55, 20, 16),
+        new THREE.MeshPhongMaterial({ color: col, emissive: col, emissiveIntensity: 0.35, shininess: 60 }));
+      egg.scale.set(1, 1.28, 1);
+      egg.position.y = 0.58;
+      root.add(egg);
+      var glow = new THREE.Mesh(new THREE.SphereGeometry(0.8, 16, 12),
+        new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.28, blending: THREE.AdditiveBlending, depthWrite: false }));
+      root.add(glow);
+      root.userData.eggGlow = glow;
+      root.userData.eggGrade = g;
+      return root;
+    },
+    // 在指定品质的魂兽群里刷一只守护魂兽
+    _spawnGuardBeast: function (grade, x, z) {
+      try {
+        var pool = (CONFIG.BEAST_TYPES || []).filter(function (t) { return grade >= t.minGrade && grade <= t.maxGrade; });
+        if (!pool.length) pool = CONFIG.BEAST_TYPES || [];
+        if (!pool.length) return null;
+        var t = pool[Math.floor(Math.random() * pool.length)];
+        var idx = CONFIG.BEAST_TYPES.indexOf(t);
+        var b = createBeast(idx, grade, x, z);
+        if (b) {
+          if (game.beasts && game.beasts.indexOf(b) < 0) game.beasts.push(b);
+          b._eventGuard = true;
+        }
+        return b;
+      } catch (e) { return null; }
+    },
+    // 刷新一枚高品质魂兽蛋：森林中成群同品质魂兽守护。noGuards=true 用于死亡掉落（只刷蛋，不再加守卫）
+    triggerEgg: function (grade, x, z, noGuards) {
+      var g = (grade === undefined) ? WorldEvents._rollEggGrade() : (grade | 0);
+      if (g < 0 || g > 4) g = 3;
+      var pos = { x: x, z: z };
+      if (x === undefined || z === undefined) pos = WorldEvents._randomPos();
+      var y = 0;
+      try { y = (typeof getTerrainHeight === 'function') ? getTerrainHeight(pos.x, pos.z) : 0; } catch (e) { y = 0; }
+      var mesh = WorldEvents._makeEggMesh(g);
+      mesh.position.set(pos.x, y + 0.3, pos.z);
+      try { if (game && game.scene) game.scene.add(mesh); } catch (e) { }
+      var guards = [];
+      if (!noGuards) {
+        try {
+          var n = 3 + Math.floor(Math.random() * 3);   // 3~5 只成群守护
+          for (var i = 0; i < n; i++) {
+            var a = Math.random() * Math.PI * 2, r = 4 + Math.random() * 5;
+            var b = WorldEvents._spawnGuardBeast(g, pos.x + Math.cos(a) * r, pos.z + Math.sin(a) * r);
+            if (b) guards.push(b);
+          }
+        } catch (e) { }
+      }
+      WorldEvents.eggEvt = { grade: g, name: WorldEvents._eggName(g), x: pos.x, z: pos.z, y: y, mesh: mesh, guards: guards, picked: false, until: Date.now() + WorldEvents.EGG_GAP };
+      var placeName = WorldEvents._sceneKey() === 'star' ? '星斗大森林' : '圣魂村外围森林';
+      WorldEvents.announce('🐣 高品质魂兽蛋 · ' + WorldEvents._eggName(g) + ' 刷新',
+        '在【' + placeName + '】· 成群' + WorldEvents._gradeName(g) + '魂兽守护 · 交互键拾取');
+      try { updateEventPanel(); } catch (e) { }
+    },
+    // 交互键拾取：给蛋 + 激怒周围守护魂兽
+    pickEgg: function () {
+      var evt = WorldEvents.eggEvt; if (!evt || evt.picked) return;
+      evt.picked = true;
+      try { if (typeof PetSystem !== 'undefined' && PetSystem.giveEggToPlayer) PetSystem.giveEggToPlayer(evt.grade, false); } catch (e) { }
+      WorldEvents.heldEgg = { grade: evt.grade, name: evt.name, t: Date.now() };
+      try {
+        var g = evt.guards || [];
+        for (var i = 0; i < g.length; i++) {
+          var b = g[i];
+          if (b && !b.dead && b.mesh) { b.state = 'chase'; b.aggroRange = Math.max(b.aggroRange || 20, 80); }
+        }
+      } catch (e) { }
+      try { if (evt.mesh && evt.mesh.parent) evt.mesh.parent.remove(evt.mesh); } catch (e) { }
+      WorldEvents.eggEvt = null;
+      try { if (typeof showHint === 'function') showHint('拾取成功！周围的魂兽被激怒了，快跑！'); } catch (e) { }
+      try { if (typeof SoundSystem !== 'undefined' && SoundSystem.playLoot) SoundSystem.playLoot(); } catch (e) { }
+      try { updateEventPanel(); } catch (e) { }
+    },
+    // 死亡掉落：从蛋背包移除一枚对应品质的蛋，并在原地重新刷新
+    dropHeldEgg: function () {
+      var h = WorldEvents.heldEgg; if (!h) return;
+      WorldEvents.heldEgg = null;
+      try {
+        var p = game.player;
+        if (p && p.pets && Array.isArray(p.pets.eggs)) {
+          for (var i = p.pets.eggs.length - 1; i >= 0; i--) {
+            if (p.pets.eggs[i] && p.pets.eggs[i].grade === h.grade) { p.pets.eggs.splice(i, 1); break; }
+          }
+        }
+      } catch (e) { }
+      var pos = (game.player && game.player.mesh) ? { x: game.player.mesh.position.x, z: game.player.mesh.position.z } : null;
+      if (pos) WorldEvents.triggerEgg(h.grade, pos.x, pos.z, true);
+      else WorldEvents.triggerEgg(h.grade, undefined, undefined, true);
+      try { if (typeof showHint === 'function') showHint('你倒下了，所持的「' + h.name + '」掉落在地'); } catch (e) { }
+    },
+    _tickEgg: function (now) {
+      var evt = WorldEvents.eggEvt;
+      if (evt) {
+        if (evt.mesh && evt.mesh.userData && evt.mesh.userData.eggGlow) {
+          evt.mesh.userData.eggGlow.rotation.y += 0.03;
+          var s = 1 + Math.sin(now * 0.004) * 0.12;
+          evt.mesh.userData.eggGlow.scale.setScalar(s);
+        }
+        if (evt.until && now > evt.until) WorldEvents._despawnEgg('timeout');
+      }
+      // 持蛋期间：逃回村庄安全区即「安全落袋」，清除掉落风险
+      var h = WorldEvents.heldEgg;
+      if (h) {
+        try {
+          var p = game.player;
+          if (p && p.mesh) {
+            var dx = p.mesh.position.x - CONFIG.VILLAGE.centerX, dz = p.mesh.position.z - CONFIG.VILLAGE.centerZ;
+            if (Math.sqrt(dx * dx + dz * dz) < CONFIG.ZONES.village) {
+              WorldEvents.heldEgg = null;
+              try { if (typeof showHint === 'function') showHint('已安全带回魂兽蛋'); } catch (e) { }
+            }
+          }
+        } catch (e) { }
+      }
+    },
+    _despawnEgg: function (reason) {
+      var evt = WorldEvents.eggEvt; if (!evt) return;
+      try { if (evt.mesh && evt.mesh.parent) evt.mesh.parent.remove(evt.mesh); } catch (e) { }
+      WorldEvents.eggEvt = null;
+      if (reason === 'timeout') { WorldEvents.announce('魂兽蛋已被魂兽叼走…', '错过了本次高品质魂兽蛋'); }
+      try { updateEventPanel(); } catch (e) { }
+    },
     drawMarkers: function (ctx, playerPos, yaw, centerX, centerY, mapRadius, worldRange) {
+      var _drawAt = function (wx, wz, color) {
+        var dx = wx - playerPos.x, dz = wz - playerPos.z;
+        var cos = Math.cos(-yaw), sin = Math.sin(-yaw);
+        var rx = dx * cos - dz * sin, rz = dx * sin + dz * cos;
+        var dist = Math.sqrt(dx * dx + dz * dz);
+        var mx = centerX + (rx / worldRange) * mapRadius;
+        var my = centerY + (rz / worldRange) * mapRadius;
+        if (dist >= worldRange) { var k = (mapRadius - 6) / Math.max(1, dist); mx = centerX + rx * k; my = centerY + rz * k; }
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(mx, my, 5, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#fff';
+        ctx.stroke();
+        ctx.restore();
+      };
       var evt = WorldEvents.active;
-      if (!evt) return;
-      var dx = evt.x - playerPos.x, dz = evt.z - playerPos.z;
-      var cos = Math.cos(-yaw), sin = Math.sin(-yaw);
-      var rx = dx * cos - dz * sin, rz = dx * sin + dz * cos;
-      var dist = Math.sqrt(dx * dx + dz * dz);
-      var mx = centerX + (rx / worldRange) * mapRadius;
-      var my = centerY + (rz / worldRange) * mapRadius;
-      var clamped = dist >= worldRange;
-      if (clamped) { var k = (mapRadius - 6) / Math.max(1, Math.sqrt(rx * rx + rz * rz)); mx = centerX + rx * k; my = centerY + rz * k; }
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(mx, my, 5, 0, Math.PI * 2);
-      ctx.fillStyle = '#fbbf24';
-      ctx.fill();
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = '#fff';
-      ctx.stroke();
-      ctx.restore();
+      if (evt) _drawAt(evt.x, evt.z, '#fbbf24');
+      // 魂兽蛋世界事件：金色蛋标记
+      if (WorldEvents.eggEvt) _drawAt(WorldEvents.eggEvt.x, WorldEvents.eggEvt.z, '#f59e0b');
     }
   };
   window.WorldEvents = WorldEvents;
@@ -54377,8 +54555,18 @@ function gameLoop() {
   function updateEventPanel() {
     var host = document.getElementById('event-info'); if (!host) return;
     var evt = WorldEvents.active;
+    var egg = WorldEvents.eggEvt;
     var typeName = { merchant: '神秘商人', chest: '天降宝箱', rift: '时空裂缝', rarebeast: '稀有魂兽降临' };
     var h = '';
+    // 魂兽蛋世界事件（每 5 分钟）
+    if (egg) {
+      h += '<div class="ex-row done"><div class="ex-fill"><div class="ex-name">🐣 高品质魂兽蛋 · ' + egg.name + '</div>' +
+        '<div class="ex-desc">成群' + WorldEvents._gradeName(egg.grade) + '魂兽守护 · 剩余 ' + remainText(egg.until) + '（小地图金蛋点）</div></div></div>';
+    } else {
+      var leftEgg = Math.max(0, WorldEvents.EGG_GAP - WorldEvents.eggTimer);
+      h += '<div class="ex-row"><div class="ex-fill"><div class="ex-name">🐣 高品质魂兽蛋</div>' +
+        '<div class="ex-desc">每 5 分钟在森林中成群魂兽守护处刷新，约 ' + remainText(Date.now() + leftEgg) + ' 后刷新</div></div></div>';
+    }
     if (evt) {
       h += '<div class="ex-row done"><div class="ex-fill"><div class="ex-name">' + (typeName[evt.type] || '事件') + '</div>' +
         '<div class="ex-desc">剩余 ' + remainText(evt.endTime) + '　位置 ' + evt.x.toFixed(0) + ',' + evt.z.toFixed(0) + '（小地图黄点）</div></div></div>';
